@@ -1,0 +1,27 @@
+{
+  "name": "multi-content-recognition-app",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "multi-content-recognition-app-frontend",
+    "multi-content-recognition-app-backend"
+  ],
+  "scripts": {
+    "dev:backend": "npm --workspace multi-content-recognition-app-backend run dev",
+    "test:backend": "npm --workspace multi-content-recognition-app-backend test",
+    "dev:frontend": "npm --workspace multi-content-recognition-app-frontend run start",
+    "test:frontend": "npm --workspace multi-content-recognition-app-frontend test",
+    "lint": "npm --workspace multi-content-recognition-app-backend run lint && npm --workspace multi-content-recognition-app-frontend run lint",
+    "test": "npm run test:backend && npm run test:frontend",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "expo": "~54.0.33",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
+  }
+}

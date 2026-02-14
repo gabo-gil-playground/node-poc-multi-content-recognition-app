@@ -1,6 +1,13 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: ['./App.{ts,tsx}', './app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}'],
+  content: [
+    './App.{ts,tsx}',
+    './index.ts',
+    './app/**/*.{ts,tsx}',
+    './components/**/*.{ts,tsx}',
+    './**/*.{ts,tsx}'
+  ],
+  presets: [require('nativewind/preset')],
   theme: {
     extend: {
       colors: {
@@ -17,7 +24,7 @@ module.exports = {
       borderRadius: {
         xl: '1.25rem'
       },
-      shadow: {
+      boxShadow: {
         soft: '0 18px 45px rgba(15, 23, 42, 0.08)'
       }
     }

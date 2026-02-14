@@ -6,6 +6,6 @@
     "paths": {
       "@/*": ["./*"]
     },
-    "types": ["jest"]
+    "types": ["jest", "nativewind/types"]
   }
 }

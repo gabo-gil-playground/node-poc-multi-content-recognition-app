@@ -1,16 +1,25 @@
-import { useEffect, useState } from 'react';
-import { Modal, Platform, Pressable, SafeAreaView, Text, TextInput, View, ScrollView } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Modal, Platform, Pressable, Text, TextInput, View, ScrollView } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import * as SplashScreen from 'expo-splash-screen';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 
 import { isSpeechRecognitionModuleAvailable, speechRecognition } from './speechRecognitionAdapter';
+
+// Keep the splash screen visible while we fetch resources
+SplashScreen.preventAutoHideAsync();
 
 type InputMode = 'idle' | 'text' | 'voice' | 'photo';
 
 const MAX_IMAGE_DIMENSION = 1080;
 const IMAGE_QUALITY = 0.7;
 
+/**
+ * Backend base URL. Loaded from .env at build time (see metro.config.js).
+ * EXPO_PUBLIC_* vars are inlined by Metro when bundling.
+ */
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:4000';
 
 const showToast = (message: string): void => {
@@ -25,7 +34,7 @@ const showToast = (message: string): void => {
   }
 };
 
-export default function App(): JSX.Element {
+export default function App(): React.ReactElement {
   const [inputMode, setInputMode] = useState<InputMode>('idle');
   const [recognizedText, setRecognizedText] = useState<string>('');
   const [textDraft, setTextDraft] = useState<string>('');
@@ -33,24 +42,31 @@ export default function App(): JSX.Element {
   const [isListening, setIsListening] = useState<boolean>(false);
 
   useEffect(() => {
-    const initSpeechRecognition = async (): Promise<void> => {
+    const initializeApp = async (): Promise<void> => {
       try {
+        // Initialize speech recognition
         if (!isSpeechRecognitionModuleAvailable || !speechRecognition) {
           setIsSpeechAvailable(false);
-          return;
+        } else {
+          try {
+            const { granted } = await speechRecognition.requestPermissionsAsync();
+            const availability = await speechRecognition.getStateAsync();
+            setIsSpeechAvailable(Boolean(granted && availability.isAvailable));
+          } catch (error) {
+            setIsSpeechAvailable(false);
+          }
         }
 
-        const { granted } = await speechRecognition.requestPermissionsAsync();
-        const availability = await speechRecognition.getStateAsync();
-
-        setIsSpeechAvailable(Boolean(granted && availability.isAvailable));
+        // Hide splash screen after a minimum delay (2 seconds as per requirement)
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       } catch (error) {
-        showToast('Speech recognition is not available on this device.');
-        setIsSpeechAvailable(false);
+        // Error handling
+      } finally {
+        await SplashScreen.hideAsync();
       }
     };
 
-    void initSpeechRecognition();
+    void initializeApp();
   }, []);
 
   const handleSelectText = (): void => {
@@ -90,7 +106,7 @@ export default function App(): JSX.Element {
       }
 
       await speechRecognition.startAsync({
-        onResult: (result) => {
+        onResult: (result: { text?: string }) => {
           if (result.text) {
             setRecognizedText(result.text);
           }
@@ -128,7 +144,7 @@ export default function App(): JSX.Element {
       const result = await ImagePicker.launchImageLibraryAsync({
         allowsEditing: false,
         quality: 1,
-        mediaTypes: ImagePicker.MediaTypeOptions.Images
+        mediaTypes: ['images']
       });
 
       if (result.canceled || !result.assets || result.assets.length === 0) {
@@ -136,11 +152,23 @@ export default function App(): JSX.Element {
       }
 
       const asset = result.assets[0];
+      
+      if (!asset.uri) {
+        showToast('Invalid image selected.');
+        return;
+      }
+
       const manipulated = await resizeAndCompressImage(asset);
+
+      if (!manipulated || !manipulated.uri) {
+        showToast('Failed to process image.');
+        return;
+      }
 
       await uploadImageForRecognition(manipulated);
     } catch (error) {
-      showToast('There was an error while processing the selected photo.');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      showToast(`Error processing photo: ${errorMessage}`);
     }
   };
 
@@ -177,35 +205,59 @@ export default function App(): JSX.Element {
 
   const uploadImageForRecognition = async (image: ImageManipulator.ImageResult): Promise<void> => {
     try {
+      if (!image.uri) {
+        showToast('Invalid image URI.');
+        return;
+      }
+
       const formData = new FormData();
 
+      // React Native FormData format - use the URI directly as returned by ImageManipulator
+      // For Android, the URI format is already correct
+      // For iOS, we may need to ensure it's a file:// URI
+      const imageUri = image.uri.startsWith('file://') ? image.uri : `file://${image.uri}`;
+      
       formData.append('image', {
-        // @ts-expect-error React Native type for File/Blob is not fully aligned with TS DOM lib
-        uri: image.uri,
+        uri: imageUri,
         name: 'photo.jpg',
         type: 'image/jpeg'
-      });
+      } as any);
 
       const response = await fetch(`${BACKEND_URL}/api/v1/vision/recognize`, {
         method: 'POST',
         body: formData,
         headers: {
           Accept: 'application/json'
+          // DO NOT include Content-Type - React Native sets it automatically with boundary
         }
       });
 
       if (!response.ok) {
-        const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null;
-        showToast(
-          errorPayload?.error ?? 'Image could not be processed. Please verify the file and try again.'
-        );
+        const statusText = response.statusText || `HTTP ${response.status}`;
+        let errorMessage = `Server error: ${statusText}`;
+        
+        try {
+          const errorPayload = (await response.json()) as { error?: string } | null;
+          if (errorPayload?.error) {
+            errorMessage = errorPayload.error;
+          }
+        } catch {
+          // If JSON parsing fails, use the status text
+        }
+        
+        showToast(errorMessage);
         return;
       }
 
       const payload = (await response.json()) as { text: string };
-      setRecognizedText(payload.text);
+      if (payload.text) {
+        setRecognizedText(payload.text);
+      } else {
+        showToast('Received empty response from server.');
+      }
     } catch (error) {
-      showToast('There was a network error while sending the image to the server.');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      showToast(`Network error: ${errorMessage}. Please check your backend connection.`);
     }
   };
 
@@ -213,101 +265,99 @@ export default function App(): JSX.Element {
   const showVoiceModal = inputMode === 'voice';
 
   return (
-    <SafeAreaView className="flex-1 bg-background">
-      <StatusBar style="dark" />
-      <View className="flex-1 px-6 pt-6 pb-4">
-        <View className="flex-row items-center justify-between mb-6">
+    <SafeAreaProvider>
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#F7FAFC' }} edges={['top', 'left', 'right']}>
+        <StatusBar style="dark" />
+      <View style={{ flex: 1, paddingHorizontal: 24, paddingTop: 24, paddingBottom: 16 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
           <View>
-            <Text className="text-textSecondary text-xs tracking-[0.15em] uppercase">
+            <Text style={{ fontSize: 24, fontWeight: '700', color: '#0F172A' }}>
               Multi Recognition POC
-            </Text>
-            <Text className="text-2xl font-semibold text-textPrimary mt-1">
-              Unified content capture
             </Text>
           </View>
         </View>
 
-        <View className="bg-surface rounded-3xl shadow-lg shadow-slate-200 p-5 mb-5">
-          <Text className="text-textSecondary text-xs mb-3">Input mode</Text>
-          <View className="flex-row gap-3">
+        <View style={{ backgroundColor: '#FFFFFF', borderRadius: 24, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 8, padding: 24, marginBottom: 20, borderWidth: 1, borderColor: '#F1F5F9' }}>
+          <Text style={{ color: '#64748B', fontSize: 14, fontWeight: '500', marginBottom: 16 }}>Input Mode</Text>
+          <View style={{ flexDirection: 'row', gap: 12 }}>
             <Pressable
               onPress={handleSelectText}
-              className="flex-1 bg-primarySoft rounded-2xl py-3 px-3 items-center justify-center"
+              style={{ flex: 1, backgroundColor: '#E0ECFF', borderRadius: 16, paddingVertical: 16, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#BFDBFE' }}
             >
-              <Text className="text-primary font-semibold">Text</Text>
+              <Text style={{ color: '#1D4ED8', fontWeight: '600', fontSize: 16 }}>Text</Text>
             </Pressable>
             <Pressable
               onPress={handleSelectVoice}
-              className="flex-1 bg-surfaceMuted rounded-2xl py-3 px-3 items-center justify-center"
+              style={{ flex: 1, backgroundColor: '#F1F5F9', borderRadius: 16, paddingVertical: 16, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#E2E8F0' }}
             >
-              <Text className="text-textPrimary font-semibold">Voice</Text>
-              <Text className="text-[10px] text-textSecondary mt-1">
-                {isSpeechAvailable ? 'Live transcription' : 'Unavailable'}
+              <Text style={{ color: '#0F172A', fontWeight: '600', fontSize: 16 }}>Voice</Text>
+              <Text style={{ fontSize: 10, color: '#64748B', marginTop: 4 }}>
+                {isSpeechAvailable ? 'Available' : 'Unavailable'}
               </Text>
             </Pressable>
             <Pressable
               onPress={handleSelectPhoto}
-              className="flex-1 bg-surfaceMuted rounded-2xl py-3 px-3 items-center justify-center"
+              style={{ flex: 1, backgroundColor: '#F1F5F9', borderRadius: 16, paddingVertical: 16, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#E2E8F0' }}
             >
-              <Text className="text-textPrimary font-semibold">Photo</Text>
-              <Text className="text-[10px] text-textSecondary mt-1">AI vision</Text>
+              <Text style={{ color: '#0F172A', fontWeight: '600', fontSize: 16 }}>Photo</Text>
+              <Text style={{ fontSize: 10, color: '#64748B', marginTop: 4 }}>AI Vision</Text>
             </Pressable>
           </View>
         </View>
 
-        <View className="flex-1 bg-surface rounded-3xl shadow-lg shadow-slate-200 p-5 mb-4">
-          <Text className="text-textSecondary text-xs mb-3">Recognized content</Text>
+        <View style={{ flex: 1, backgroundColor: '#FFFFFF', borderRadius: 24, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 8, padding: 24, marginBottom: 16, borderWidth: 1, borderColor: '#F1F5F9' }}>
+          <Text style={{ color: '#64748B', fontSize: 14, fontWeight: '500', marginBottom: 16 }}>Recognized Content</Text>
           <ScrollView
-            className="flex-1 rounded-2xl bg-surfaceMuted px-4 py-3"
+            style={{ flex: 1, borderRadius: 16, backgroundColor: '#F1F5F9', paddingHorizontal: 20, paddingVertical: 16, borderWidth: 1, borderColor: '#E2E8F0' }}
             contentContainerStyle={{ flexGrow: 1 }}
           >
             <Text
-              className={`text-sm leading-relaxed text-textPrimary ${
-                recognizedText ? '' : 'text-textSecondary'
-              }`}
+              style={{
+                fontSize: 16,
+                lineHeight: 24,
+                color: recognizedText ? '#0F172A' : '#64748B',
+                fontStyle: recognizedText ? 'normal' : 'italic'
+              }}
             >
-              {recognizedText || 'Your recognized text will appear here in read‑only mode.'}
+              {recognizedText || 'Your recognized text will appear here.'}
             </Text>
           </ScrollView>
         </View>
 
-        <View className="h-[56] bg-surface border border-surfaceMuted rounded-3xl flex-row items-center justify-center">
-          <Text className="text-[11px] text-textSecondary">
-            System navigation area · keeps OS buttons clearly visible
-          </Text>
-        </View>
+        <View style={{ height: 56, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#F1F5F9' }} />
       </View>
 
       {/* Text input modal */}
       <Modal transparent visible={showTextModal} animationType="fade">
-        <View className="flex-1 bg-black/40 items-center justify-center px-6">
-          <View className="w-full bg-surface rounded-3xl p-5">
-            <Text className="text-base font-semibold text-textPrimary mb-2">Type your content</Text>
-            <Text className="text-xs text-textSecondary mb-3">
-              Manual text input will be displayed as read‑only after you confirm.
+        <View style={{ flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
+          <View style={{ width: '100%', backgroundColor: '#FFFFFF', borderRadius: 24, padding: 24, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
+            <Text style={{ fontSize: 18, fontWeight: '600', color: '#0F172A', marginBottom: 8 }}>Type Your Content</Text>
+            <Text style={{ fontSize: 14, color: '#64748B', marginBottom: 16 }}>
+              Enter text manually. It will be displayed in read-only mode after confirmation.
             </Text>
-            <View className="rounded-2xl bg-surfaceMuted px-3 py-2 mb-4">
+            <View style={{ borderRadius: 16, backgroundColor: '#F1F5F9', paddingHorizontal: 16, paddingVertical: 12, marginBottom: 20, borderWidth: 1, borderColor: '#E2E8F0', minHeight: 120 }}>
               <TextInput
                 value={textDraft}
                 onChangeText={setTextDraft}
                 placeholder="Start typing here..."
                 placeholderTextColor="#94A3B8"
                 multiline
-                className="text-sm text-textPrimary min-h-[96]"
+                style={{ fontSize: 16, color: '#0F172A', minHeight: 120 }}
+                autoFocus
               />
             </View>
-            <View className="flex-row justify-end gap-3">
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12 }}>
               <Pressable
                 onPress={handleCancelText}
-                className="px-4 py-2 rounded-full bg-surfaceMuted"
+                style={{ paddingHorizontal: 20, paddingVertical: 12, borderRadius: 999, backgroundColor: '#F1F5F9' }}
               >
-                <Text className="text-xs font-semibold text-textSecondary">Cancel</Text>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#64748B' }}>Cancel</Text>
               </Pressable>
               <Pressable
                 onPress={handleConfirmText}
-                className="px-5 py-2 rounded-full bg-primary"
+                style={{ paddingHorizontal: 24, paddingVertical: 12, borderRadius: 999, backgroundColor: '#1D4ED8' }}
               >
-                <Text className="text-xs font-semibold text-white">Confirm</Text>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#FFFFFF' }}>Confirm</Text>
               </Pressable>
             </View>
           </View>
@@ -316,50 +366,61 @@ export default function App(): JSX.Element {
 
       {/* Voice capture modal */}
       <Modal transparent visible={showVoiceModal} animationType="fade">
-        <View className="flex-1 bg-black/40 items-center justify-center px-6">
-          <View className="w-full bg-surface rounded-3xl p-5">
-            <Text className="text-base font-semibold text-textPrimary mb-2">Speak to capture</Text>
-            <Text className="text-xs text-textSecondary mb-4">
-              Your voice will be converted to text and displayed in the read‑only area below.
+        <View style={{ flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
+          <View style={{ width: '100%', backgroundColor: '#FFFFFF', borderRadius: 24, padding: 24, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 12, borderWidth: 1, borderColor: '#E2E8F0' }}>
+            <Text style={{ fontSize: 18, fontWeight: '600', color: '#0F172A', marginBottom: 8 }}>Voice Recognition</Text>
+            <Text style={{ fontSize: 14, color: '#64748B', marginBottom: 24 }}>
+              Speak clearly. Your voice will be converted to text and displayed below.
             </Text>
-            <View className="items-center justify-center mb-4">
+            <View style={{ alignItems: 'center', justifyContent: 'center', marginBottom: 24 }}>
               <View
-                className={`w-24 h-24 rounded-full items-center justify-center ${
-                  isListening ? 'bg-accent/20' : 'bg-surfaceMuted'
-                }`}
+                style={{
+                  width: 128,
+                  height: 128,
+                  borderRadius: 64,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: isListening ? '#CFFAFE' : '#F1F5F9'
+                }}
               >
                 <View
-                  className={`w-14 h-14 rounded-full items-center justify-center ${
-                    isListening ? 'bg-accent' : 'bg-primary'
-                  }`}
+                  style={{
+                    width: 80,
+                    height: 80,
+                    borderRadius: 40,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: isListening ? '#06B6D4' : '#1D4ED8'
+                  }}
                 >
-                  <Text className="text-white font-semibold text-xs">
-                    {isListening ? 'Listening' : 'Tap to start'}
+                  <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 14, textAlign: 'center', paddingHorizontal: 8 }}>
+                    {isListening ? 'Listening...' : 'Tap Start'}
                   </Text>
                 </View>
               </View>
             </View>
-            <View className="flex-row justify-end gap-3">
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12 }}>
               <Pressable
                 onPress={stopListening}
-                className="px-4 py-2 rounded-full bg-surfaceMuted"
+                style={{ paddingHorizontal: 20, paddingVertical: 12, borderRadius: 999, backgroundColor: '#F1F5F9' }}
               >
-                <Text className="text-xs font-semibold text-textSecondary">
+                <Text style={{ fontSize: 14, fontWeight: '600', color: '#64748B' }}>
                   {isListening ? 'Stop' : 'Close'}
                 </Text>
               </Pressable>
               {!isListening && (
                 <Pressable
                   onPress={startListening}
-                  className="px-5 py-2 rounded-full bg-primary"
+                  style={{ paddingHorizontal: 24, paddingVertical: 12, borderRadius: 999, backgroundColor: '#1D4ED8' }}
                 >
-                  <Text className="text-xs font-semibold text-white">Start</Text>
+                  <Text style={{ fontSize: 14, fontWeight: '600', color: '#FFFFFF' }}>Start</Text>
                 </Pressable>
               )}
             </View>
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }

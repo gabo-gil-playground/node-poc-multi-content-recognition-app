@@ -15,3 +15,12 @@ jest.mock('expo-speech-recognition', () => ({
   stopAsync: jest.fn().mockResolvedValue(undefined)
 }));
 
+jest.mock('expo-splash-screen', () => {
+  const actual = jest.requireActual('expo-splash-screen');
+  return {
+    ...actual,
+    preventAutoHideAsync: jest.fn().mockResolvedValue(undefined),
+    hideAsync: jest.fn().mockResolvedValue(undefined)
+  };
+});
+

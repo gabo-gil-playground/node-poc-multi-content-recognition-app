@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 
 import { logger } from '../logger/logger';
 
-dotenv.config();
+dotenv.config({ path: '../.env' });
 
 /**
  * Centralized environment configuration for the backend.
